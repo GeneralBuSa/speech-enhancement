@@ -122,7 +122,7 @@ def main() -> None:
 
     root = Path.cwd()
     if args.checkpoint is not None:
-        cfg = torch.load(args.checkpoint, map_location="cpu")["config"]
+        cfg = torch.load(args.checkpoint, map_location="cpu", weights_only=True)["config"]
         out_dir = args.out_dir or args.checkpoint.parent / f"eval_{args.split}"
     elif args.config is not None:
         cfg = yaml.safe_load(args.config.read_text(encoding="utf-8"))

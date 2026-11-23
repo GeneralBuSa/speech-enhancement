@@ -105,3 +105,41 @@ def test_static_path_traversal_blocked(running):
     with pytest.raises(Exception) as e:
         urlopen(f"{base}/samples/..%2F..%2FREADME.md")
     assert getattr(e.value, "code", None) == 404
+
+
+@pytest.mark.parametrize("host,code", [
+    ("localhost:8080", 200), ("127.0.0.1", 200), ("[::1]:8080", 200),
+    ("evil.example:8080", 403), ("localhost.evil.example", 403), ("", 403),
+])
+def test_dns_rebinding_host_check(running, monkeypatch, host, code):
+    """Loopback'te dinlerken yabancı Host başlıklı istekler (DNS rebinding) reddedilir."""
+    base, _ = running
+    monkeypatch.setattr(srv.Handler, "allowed_hosts", srv.LOOPBACK_HOSTS)
+    for method, data in (("GET", None), ("POST", b"x")):
+        req = Request(f"{base}/api/status" if method == "GET" else f"{base}/api/enhance?model=yok",
+                      data=data, method=method, headers={"Host": host})
+        try:
+            with urlopen(req) as r:
+                got = r.status
+        except Exception as e:  # urllib HTTPError
+            got = getattr(e, "code", None)
+        assert (got == 403) == (code == 403), (method, host, got)
+
+
+def test_checkpoint_loads_with_weights_only(tmp_path):
+    """load_model pickle ile rastgele nesne çalıştırmaz: zararsız checkpoint yüklenir, yabancı nesne reddedilir."""
+    from src.models.enhancer import load_model
+    cfg = {"model": {"name": "unet", "base_ch": 8, "depth": 3, "skip": True, "out_mode": "mask"},
+           "stft": {"n_fft": 512, "hop": 128}, "data": {"sr": 16000}}
+    ok = tmp_path / "ok.pt"
+    torch.save({"config": cfg, "model": build_model(cfg).state_dict()}, ok)
+    assert load_model(ok)[1] == cfg
+
+    bad = tmp_path / "bad.pt"
+    torch.save({"config": cfg, "model": build_model(cfg).state_dict(), "x": _Payload()}, bad)
+    with pytest.raises(Exception):
+        load_model(bad)
+
+
+class _Payload:  # weights_only=True bu sınıfı açmayı reddetmeli
+    pass

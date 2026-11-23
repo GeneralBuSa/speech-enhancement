@@ -70,25 +70,6 @@ düştüğü. Asıl değerlendirme dinleme ve spektrogramlarla yapılır.
 
 Tüm hiperparametreler `configs/` altındaki YAML dosyalarından yönetilir.
 
-### Web arayüzü
-
-![SesTemiz web arayüzü: -5 dB tavuk sesi örneğinde gürültülü ve temizlenmiş spektrogram karşılaştırması](docs/web_arayuz.png)
-
-React arayüzü (`web/`) bir ses dosyası yükleyip, mikrofonla kaydedip ya da `samples/` örneklerini seçip modeli
-çalıştırır. Gürültülü ve temizlenmiş spektrogramları sürüklenebilir bir sınırla karşılaştırır, iki sürümü kesintisiz
-geçişle dinletir, modelin maskesini ve (örneklerde) SI-SNR / PESQ / STOI değişimini gösterir. Modeller yoksa
-Release'ten `models/` altına indirilir. Bir örneğe doğrudan bağlantı verilebilir: `http://localhost:8000/?ornek=snr-5_hen`. Node.js 20+ gerekir.
-"Gerçek kayıtlar" listesi `samples/gercek/` altındaki telefon kayıtlarını (E7'den kayıt 04, 05, 17, 22) gösterir; liste
-`samples/gercek/kayitlar.json` dosyasından okunur, temiz hali olmadığı için bu kayıtlarda ölçüm gösterilmez.
-
-```bash
-cd web && npm install && npm run build && cd ..
-uv run python -m src.api                 # http://localhost:8000 (API + derlenmiş arayüz)
-
-# Arayüz üzerinde çalışırken: API'yi yukarıdaki gibi açın, ayrı terminalde
-cd web && npm run dev                     # http://localhost:5173, /api isteklerini 8000'e yönlendirir
-```
-
 ### Demo
 
 [`notebooks/demo.ipynb`](notebooks/demo.ipynb): en iyi iki modelle (`e3_depth5`, `e1_si_snr`) örnekleri temizler,
@@ -100,11 +81,21 @@ gürültülü/temizlenmiş sesleri dinletir, önce/sonra spektrogramlarını ve 
 uv run jupyter nbconvert --to notebook --execute notebooks/demo.ipynb --output demo_run.ipynb
 ```
 
-### Stüdyo arayüzü (derlemesiz alternatif)
+### Web arayüzü
+
+![SesTemiz giriş sayfası](docs/arayuz_giris.webp)
+
+| Stüdyo: A/B oynatıcı, spektrogram, ölçümler | Örnekler (açık tema) |
+|---|---|
+| ![Stüdyo](docs/arayuz_studyo.webp) | ![Örnekler](docs/arayuz_ornekler_acik.webp) |
 
 `studio/` altındaki stüdyo arayüzü (TR/EN, açık/koyu tema) dosya yükleyerek, mikrofonla kaydederek ya da hazır
-örnekleri seçerek temizleme yapar. A/B karşılaştırmalı oynatıcı, kaydırmalı spektrogram, sonuç grafikleri ve
-yöntem anlatımı içerir. Ek bağımlılık gerektirmez; sunucu yalnızca standart kütüphaneyi kullanır.
+örnekleri seçerek temizleme yapar. A/B karşılaştırmalı oynatıcı, kaydırmalı spektrogram, sonuç grafikleri,
+cevaplarıyla araştırma soruları ve yöntem anlatımı içerir. İlk ziyarette sayfaları tanıtan bir site turu açılır
+(üstteki pusula düğmesiyle yeniden başlatılır). Ek bağımlılık ve derleme adımı gerektirmez; sunucu yalnızca
+standart kütüphaneyi kullanır. "Gerçek telefon kayıtları" grubu `samples/gercek/` altındaki E7 kayıtlarını
+(04, 05, 17, 22) gösterir; liste `samples/gercek/kayitlar.json` dosyasından okunur. Temiz hali olmadığı için bu
+kayıtlarda ölçüm yoktur; "Temizlenmiş" düğmesi modelin çıktısını çalar.
 
 ```bash
 uv run python -m app.server --open      # http://localhost:8080
@@ -115,7 +106,18 @@ Model yerelde yoksa ilk kullanımda GitHub Release'ten `models/` klasörüne ind
 referansa göre SI-SNR / STOI (PESQ kuruluysa o da) önce → sonra olarak gösterilir. Model sunucusuna
 ulaşılamazsa arayüz çevrimdışı önizleme moduna geçer ve sunucu açılınca kendiliğinden bağlanır.
 `tests/test_server.py`, sunucunun döndürdüğü sesin doğrudan çıkarımla örnek örnek aynı olduğunu (uzunluk,
-gecikme, genlik) doğrular.
+gecikme, genlik) doğrular. Yazı tipi (Inter, SIL OFL) `studio/fonts/` altından sunulur; sayfa üçüncü taraf bir
+sunucuya istek atmaz.
+
+Sunucu açıkken `uv run python -m app.loadtest` hız, trafik (100-400 eşzamanlı kullanıcı) ve stres (100 eşzamanlı
+temizleme isteği) testlerini çalıştırır. Yerel ölçümde (RTX GPU) 400 eşzamanlı kullanıcıya kadar hata yok; 100
+kullanıcının aynı anda sayfayı açmasında en yavaş %5'i 1-2 sn. Temizleme istekleri GPU'da sırayla işlenir; 100
+eşzamanlı istekte sonuncusu 8-15 sn içinde döner.
+
+Güvenlik: sunucu varsayılan olarak yalnızca `localhost`'ta dinler ve DNS rebinding'e karşı yabancı `Host`
+başlıklı istekleri reddeder (403); dosya sunumu `studio/` ve `samples/` dışına çıkamaz, istek gövdesi 60 MB ile
+sınırlıdır, checkpoint'ler `torch.load(weights_only=True)` ile yüklenir. `--host 0.0.0.0` ile ağa açmak kimlik
+doğrulama ve istek sınırı içermediğinden yalnızca güvenilen yerel ağda önerilir.
 
 ### Türkçe denemeler
 
@@ -128,7 +130,7 @@ sayfası bu dosyayı okur.
 Hazır örnekler repoda olduğundan yeniden üretmek gerekmez. Üretmek isterseniz: `data/raw/` git'e eklenmediği
 için kaynak ses dosyalarını (wav/mp3/flac/ogg/m4a) `data/raw/turkce/` altına kendiniz koyun (isteğe bağlı
 `metinler.txt`: `dosya|metin`). Betik `e3_depth5` ve `e1_si_snr` checkpoint'lerini `models/` ya da
-`experiments/` altında arar; yoksa önce arayüzlerden birini ya da demo notebook'u bir kez çalıştırarak indirin.
+`experiments/` altında arar; yoksa önce web arayüzünü ya da demo notebook'u bir kez çalıştırarak indirin.
 
 ```bash
 uvx edge-tts --voice tr-TR-EmelNeural --text "Bugün hava çok güzel." --write-media data/raw/turkce/01.mp3
@@ -140,16 +142,15 @@ uv run python -m src.make_tr_samples
 ```
 configs/        Deney config'leri (YAML)
 data/           Ham ve işlenmiş veri (git'e eklenmez)
-docs/           Proje şartnamesi ve sonuç tabloları
+docs/           Proje şartnamesi, sonuç tabloları ve arayüz ekran görüntüleri
 src/            Kaynak kod (veri, model, kayıplar, eğitim, değerlendirme, Türkçe denemeler)
 tests/          Birim testleri (sunucu senkron testi dahil)
 notebooks/      Demo notebook
-web/            React arayüzü (src/api.py ile sunulur)
 experiments/    Eğitim çıktıları, checkpoint'ler, loglar (git'e eklenmez)
 models/         Release'ten indirilen checkpoint'ler (git'e eklenmez)
-samples/        Örnek ses ve spektrogram görselleri; samples/tr/ Türkçe denemeler
-studio/         Stüdyo arayüzü (HTML/CSS/JS, derleme adımı yok)
-app/            Arayüz için yerel sunucu (yalnızca standart kütüphane)
+samples/        Örnek ses ve spektrogram görselleri; samples/tr/ Türkçe denemeler, samples/gercek/ telefon kayıtları
+studio/         Stüdyo arayüzü (HTML/CSS/JS, yerel yazı tipi; derleme adımı yok)
+app/            Arayüz için yerel sunucu ve yük testi (yalnızca standart kütüphane)
 ```
 
 ## Yol Haritası
@@ -161,7 +162,7 @@ app/            Arayüz için yerel sunucu (yalnızca standart kütüphane)
 - [x] **M4** — Baseline eğitim ve değerlendirme
 - [x] **M5** — Deneyler (kayıp, skip, derinlik, çıkış türü, SNR, görülmemiş gürültü, gerçek kayıt)
 - [x] **M6** — Demo notebook ve sonuç tabloları
-- [x] **M7** — Web arayüzleri (React + FastAPI; derlemesiz stüdyo, TR/EN, açık/koyu tema) ve Türkçe denemeler
+- [x] **M7** — Web arayüzü (stüdyo, TR/EN, açık/koyu tema) ve Türkçe denemeler
 
 ## Sonuçlar
 

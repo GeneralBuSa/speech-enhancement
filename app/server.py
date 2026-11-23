@@ -19,7 +19,6 @@ import socket
 import threading
 import time
 import webbrowser
-from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
@@ -33,10 +32,12 @@ OPTIONAL_MODELS = ("baseline", "e1_mse", "e2_no_skip", "e3_depth3", "e4_direct")
 SEED = 42
 MAX_BYTES = 60 * 1024 * 1024
 MAX_SECONDS = 120
+LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "[::1]"})
 
 log = logging.getLogger("sestemiz")
 mimetypes.add_type("text/javascript", ".js")
 mimetypes.add_type("audio/wav", ".wav")
+mimetypes.add_type("font/woff2", ".woff2")  # yerel Inter (Windows'ta kayıt defterinde tanımlı olmayabilir)
 
 
 def local_checkpoint(name: str) -> Path | None:
@@ -157,6 +158,12 @@ def _read_cached(path: Path, mtime_ns: int, gzip: bool) -> bytes:
 class Handler(BaseHTTPRequestHandler):
     engine: Engine
     server_version = "SesTemiz/1.0"
+    sys_version = ""  # Server başlığında Python sürümü görünmesin
+    # Keep-alive: tarayıcı sayfanın ~10 dosyasını birkaç bağlantı üzerinden çeker; her istekte yeni TCP
+    # bağlantısı açmak eşzamanlı yükte kuyruğu dolduruyordu. Boşta kalan bağlantı 15 sn sonra kapanır.
+    protocol_version = "HTTP/1.1"
+    timeout = 15
+    allowed_hosts: frozenset[str] | None = None  # main() loopback'te dinlerken doldurur
 
     def log_message(self, fmt, *args):  # sessiz erişim günlüğü
         log.debug("%s %s", self.address_string(), fmt % args)
@@ -169,6 +176,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store" if ctype.startswith("application/json") else "no-cache")
         for k, v in (headers or {}).items():
             self.send_header(k, v)
+        if self.close_connection:  # istemci bağlantıyı yeniden kullanmaya çalışmasın
+            self.send_header("Connection", "close")
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
@@ -180,10 +189,25 @@ class Handler(BaseHTTPRequestHandler):
         self._send(status, msg.encode(), "text/plain; charset=utf-8")
 
     # ---- yönlendirme
+    def _host_ok(self) -> bool:
+        """DNS rebinding koruması: sunucu yalnızca loopback'te dinliyorsa Host başlığı da loopback olmalı.
+        Aksi halde ziyaret edilen kötü niyetli bir site kendi alan adını 127.0.0.1'e çözdürüp API'yi kullanabilirdi."""
+        if self.allowed_hosts is None:
+            return True
+        host = (self.headers.get("Host") or "").strip().lower()
+        name = host[: host.find("]") + 1] if host.startswith("[") else host.rsplit(":", 1)[0]
+        if name in self.allowed_hosts:
+            return True
+        self.close_connection = True
+        self._error(403, "Bu sunucu yalnızca localhost üzerinden kullanılabilir")
+        return False
+
     def do_HEAD(self) -> None:
         self.do_GET()
 
     def do_GET(self) -> None:
+        if not self._host_ok():
+            return
         path = unquote(urlparse(self.path).path)
         if path == "/api/status":
             try:
@@ -197,6 +221,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         url = urlparse(self.path)
+        # Erken dönülen hatalarda gövde okunmaz; keep-alive bağlantıda okunmamış baytlar sonraki isteği bozmasın.
+        self.close_connection = True
+        if not self._host_ok():
+            return
         if url.path != "/api/enhance":
             return self._error(404, "Bulunamadı")
         q = parse_qs(url.query)
@@ -207,8 +235,10 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         if not 0 < length <= MAX_BYTES:
             return self._error(413, "Ses dosyası boş ya da çok büyük")
+        wav = self.rfile.read(length)
+        self.close_connection = False  # gövde tamamen okundu, bağlantı yeniden kullanılabilir
         try:
-            body, info = self.engine.enhance(self.rfile.read(length), name, ref)
+            body, info = self.engine.enhance(wav, name, ref)
         except Exception as e:
             log.exception("Çıkarım hatası")
             return self._error(500, str(e))
@@ -255,6 +285,8 @@ def main() -> None:
     Handler.engine = Engine(args.device)
     # torch importu birkaç saniye sürer; ilk /api/status isteği beklemesin diye arka planda ısıt
     threading.Thread(target=lambda: Handler.engine.device, daemon=True).start()
+    if args.host in LOOPBACK_HOSTS:
+        Handler.allowed_hosts = LOOPBACK_HOSTS
     servers = make_servers(args.host, args.port)
     for extra in servers[1:]:
         threading.Thread(target=extra.serve_forever, daemon=True).start()
@@ -271,7 +303,13 @@ def main() -> None:
             s.server_close()
 
 
-class _V6Server(ThreadingHTTPServer):
+class _Server(ThreadingHTTPServer):
+    # Varsayılan bekleme kuyruğu 5 bağlantı; anlık 100+ kullanıcıda taşan bağlantılar TCP'nin ~2 sn'lik
+    # yeniden deneme gecikmesine düşüyor ya da reddediliyordu.
+    request_queue_size = 256
+
+
+class _V6Server(_Server):
     address_family = socket.AF_INET6
 
 
@@ -279,8 +317,8 @@ def make_servers(host: str, port: int) -> list[ThreadingHTTPServer]:
     """`localhost` için hem 127.0.0.1 hem ::1 dinlenir. Aksi halde Windows'ta tarayıcı önce ::1'i deneyip
     her istekte zaman aşımı bekler (senkronda gecikme olarak görünür)."""
     if host != "localhost":
-        return [ThreadingHTTPServer((host, port), Handler)]
-    servers = [ThreadingHTTPServer(("127.0.0.1", port), Handler)]
+        return [_Server((host, port), Handler)]
+    servers = [_Server(("127.0.0.1", port), Handler)]
     try:
         servers.append(_V6Server(("::1", port), Handler))
     except OSError:

@@ -41,7 +41,9 @@ class SpectralEnhancer(nn.Module):
 
 def load_model(checkpoint: Path, device: torch.device | str = "cpu") -> tuple[SpectralEnhancer, dict]:
     """train.py'nin kaydettiği checkpoint'ten modeli (eval modunda) ve config'i yükler."""
-    state = torch.load(checkpoint, map_location=device)
+    # weights_only: checkpoint ağdan da inebilir; torch < 2.6'da varsayılan False olduğundan pickle ile kod
+    # çalıştırılmasın diye açıkça veriliyor (yalnızca tensör ve düz Python türleri yüklenir).
+    state = torch.load(checkpoint, map_location=device, weights_only=True)
     model = build_model(state["config"]).to(device)
     model.load_state_dict(state["model"])
     return model.eval(), state["config"]

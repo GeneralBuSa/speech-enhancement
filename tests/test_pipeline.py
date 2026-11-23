@@ -6,7 +6,6 @@ from pathlib import Path
 import pandas as pd
 import pytest
 import soundfile as sf
-import torch
 
 import src.evaluate as evaluate_mod
 from src.data.make_dataset import build_dataset

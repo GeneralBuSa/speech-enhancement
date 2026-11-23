@@ -63,10 +63,22 @@
       return TR;
     })
     .catch(() => null);
-  const findSample = (id) => SAMPLES.find((s) => s.id === id) || TR?.items.find((s) => s.id === id);
   const sampleName = (id) => id.split("/").pop();
   const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
   trReady.then(() => TR?.items.forEach((it) => { it.text = esc(it.text || ""); }));
+  // Gerçek telefon kayıtları (E7): samples/gercek/kayitlar.json; temiz referansları yok, ölçüm gösterilmez
+  let REAL = null;
+  const realReady = fetch(`${SAMPLE_BASE}gercek/kayitlar.json`, { cache: "no-cache" })
+    .then((r) => (r.ok ? r.json() : null))
+    .then((j) => {
+      const items = Object.entries(j || {}).map(([key, v]) => ({ id: `gercek/${key}`, key, label: esc(v?.label || key), real: true }));
+      REAL = items.length ? items : null;
+      return REAL;
+    })
+    .catch(() => null);
+  const REAL_ENH = {}; // gerçek kayıtların model çıktıları (id -> Promise<{url, samples}>), oturum boyunca saklanır
+  const realLabel = (s) => { const k = `real.${s.key}`, v = t(k); return v === k ? s.label : v; };
+  const findSample = (id) => SAMPLES.find((s) => s.id === id) || TR?.items.find((s) => s.id === id) || REAL?.find((s) => s.id === id);
 
   const EXPS = ["baseline", "e1_mse", "e1_si_snr", "e2_no_skip", "e3_depth3", "e3_depth5", "e4_direct"];
   // [ortalama, std] ve baseline'a fark (Δ). Kaynak: docs/results.md
@@ -137,7 +149,6 @@
     applyI18n(document, true);
     langSeg.set(l);
     app.onLang?.();
-    updateStatusPill();
     requestAnimationFrame(positionNavPill);
   }
 
@@ -198,8 +209,22 @@
     nav.classList.toggle("open", open);
     menuBtn.setAttribute("aria-expanded", open);
   });
-  addEventListener("scroll", () => $("#topbar").classList.toggle("scrolled", scrollY > 8), { passive: true });
-  $("#toTop").addEventListener("click", () => scrollTo({ top: 0, behavior: reduced ? "auto" : "smooth" }));
+  const toTop = () => scrollTo({ top: 0, behavior: reduced ? "auto" : "smooth" });
+  const fabTop = $("#fabTop");
+  let scrollTick = 0;
+  const onScroll = () => {
+    scrollTick = 0;
+    $("#topbar").classList.toggle("scrolled", scrollY > 8);
+    const max = document.documentElement.scrollHeight - innerHeight;
+    const show = scrollY > Math.min(320, innerHeight * 0.4);
+    fabTop.classList.toggle("show", show);
+    fabTop.tabIndex = show ? 0 : -1;
+    fabTop.style.setProperty("--p", max > 0 ? Math.min(1, scrollY / max).toFixed(3) : 0);
+  };
+  addEventListener("scroll", () => { scrollTick ||= requestAnimationFrame(onScroll); }, { passive: true });
+  addEventListener("resize", () => { scrollTick ||= requestAnimationFrame(onScroll); }, { passive: true });
+  onScroll();
+  fabTop.addEventListener("click", () => { toTop(); fabTop.blur(); });
 
   // ------------------------------------------------------------------ mıknatıslı butonlar & kart ışığı
   // Giriş animasyonu bitince kalıcı `filter: blur(0)` katmanını bırak (görünüm aynı, her karede daha az iş)
@@ -244,15 +269,6 @@
   });
 
   // ------------------------------------------------------------------ sunucu durumu
-  const statusEl = $("#status");
-  function updateStatusPill() {
-    if (!statusEl) return; // durum noktası arayüzden kaldırıldı; sunucu kontrolü arka planda sürer
-    const s = app.server.state;
-    statusEl.dataset.state = s;
-    const label = s === "online" ? `${t("status.online")}${app.server.device ? " · " + app.server.device : ""}` : t(`status.${s}`);
-    $("span", statusEl).textContent = label; // görünmez; ekran okuyucu ve ipucu için
-    statusEl.title = label;
-  }
   async function checkServer() {
     const prev = app.server.state;
     try {
@@ -266,13 +282,25 @@
     } catch {
       app.server = { state: "offline", device: null, models: DEFAULT_MODELS };
     }
-    updateStatusPill();
     if (prev !== app.server.state) app.onServer?.();
   }
 
   // ------------------------------------------------------------------ yönlendirici
   const ORDER = ["", "studio", "samples", "results", "method", "about"];
-  const PAGES = { "": initHome, studio: initStudio, samples: initSamples, results: initResults, method: () => {}, about: () => {} };
+  // Yöntem: araştırma soruları akordeonu (cevap, soruya basınca açılır)
+  function initMethod(root) {
+    const set = (li, open) => {
+      li.classList.toggle("open", open);
+      $(".q-toggle", li).setAttribute("aria-expanded", open);
+      $(".q-body", li).inert = !open; // kapalıyken içindeki bağlantı Tab ile odaklanmasın
+    };
+    $$(".q-item", root).forEach((li) => {
+      set(li, false);
+      $(".q-toggle", li).addEventListener("click", () => set(li, !li.classList.contains("open")));
+    });
+  }
+
+  const PAGES = { "": initHome, studio: initStudio, samples: initSamples, results: initResults, method: initMethod, about: () => {} };
   const view = $("#view");
   const parseRoute = () => {
     const r = location.hash.replace(/^#\/?/, "").split(/[/?]/)[0];
@@ -336,18 +364,21 @@
     }), { threshold: 0.4 });
     $$("[data-count]", root).forEach((el) => io.observe(el));
     app.cleanups.push(() => io.disconnect());
-    app.onLang = () => $$("[data-count]", root).forEach((el) => {
-      el.textContent = (el.dataset.prefix || "") + fmt(+el.dataset.count, +el.dataset.dec) + (el.dataset.suffix || "");
-    });
+    app.onLang = () => {
+      $$("[data-count]", root).forEach((el) => {
+        el.textContent = (el.dataset.prefix || "") + fmt(+el.dataset.count, +el.dataset.dec) + (el.dataset.suffix || "");
+      });
+      renderMarquee();
+    };
 
     // kayan şerit
-    const noises = ["dog", "rooster", "rain", "sea waves", "crackling fire", "crickets", "chirping birds", "water drops", "wind", "pouring water",
-      "toilet flush", "thunderstorm", "crying baby", "sneezing", "clapping", "breathing", "coughing", "footsteps", "laughing", "brushing teeth",
-      "snoring", "door knock", "mouse click", "keyboard typing", "door wood creaks", "can opening", "washing machine", "vacuum cleaner",
-      "clock alarm", "clock tick", "glass breaking", "helicopter", "chainsaw", "siren", "car horn", "engine", "train", "church bells", "airplane", "fireworks", "hand saw"];
+    // kayan şerit: ESC-50 gürültü sınıfları, seçili dilde (home.noises)
     const track = $("#marquee", root);
-    const items = noises.map((n) => `<span>${n}</span>`).join("");
-    track.innerHTML = items + items;
+    const renderMarquee = () => {
+      const items = t("home.noises").map((n) => `<span>${n}</span>`).join("");
+      track.innerHTML = items + items;
+    };
+    renderMarquee();
 
     // kahraman tuval: gürültülü ⟷ temiz
     const cv = $("#heroCanvas", root), vu = $$("#heroVu i", root);
@@ -401,7 +432,7 @@
       g.fillRect(sx - dpr * 0.75, 0, dpr * 1.5, h);
       g.beginPath(); g.arc(sx, mid, 13 * dpr, 0, Math.PI * 2); g.fill();
       g.fillStyle = colors.bg;
-      g.font = `${11 * dpr}px "Martian Mono", monospace`; g.textAlign = "center"; g.textBaseline = "middle";
+      g.font = `${11 * dpr}px ${cssVar("--font-mono")}`; g.textAlign = "center"; g.textBaseline = "middle";
       g.fillText("⟷", sx, mid + dpr * 0.5);
       // VU
       const lit = Math.round(vuLevel * vu.length * (0.85 + 0.15 * Math.sin(time * 20)));
@@ -528,13 +559,17 @@
 
     // --- örnek çipleri
     const chip = (s) => `<button type="button" class="chip" data-id="${s.id}"><b>${fmt(s.snr, 0, true)} dB</b>${t("noise." + s.noise)}</button>`;
+    const realChip = (s) => `<button type="button" class="chip" data-id="${s.id}"><b>${t("studio.phone")}</b>${realLabel(s)}</button>`;
     const renderChips = () => {
       els.chips.innerHTML = SAMPLES.map(chip).join("");
       $("#trChipGroup", root).hidden = !TR;
       if (TR) $("#trChips", root).innerHTML = TR.items.map(chip).join("");
+      $("#realChipGroup", root).hidden = !REAL;
+      if (REAL) $("#realChips", root).innerHTML = REAL.map(realChip).join("");
     };
     renderChips();
     trReady.then(renderChips);
+    realReady.then(() => root.isConnected && renderChips());
     $(".sample-pick", root).addEventListener("click", (e) => { const b = e.target.closest(".chip"); if (b) loadSample(b.dataset.id); });
 
     // --- modeller
@@ -588,7 +623,7 @@
     async function loadSample(id) {
       try {
         const buf = await (await fetch(sampleUrl(id, "noisy"))).arrayBuffer();
-        setInput(await DSP.decodeToMono16k(buf), `${sampleName(id)}_noisy.wav`, id);
+        setInput(await DSP.decodeToMono16k(buf), `${sampleName(id)}_noisy.wav`, findSample(id)?.real ? null : id);
       } catch { toast(t("toast.decode"), "err"); }
     }
     els.file.addEventListener("change", () => { if (els.file.files[0]) loadFile(els.file.files[0]); els.file.value = ""; });
@@ -799,13 +834,27 @@
         <a href="#/studio" class="btn btn-ghost" data-open data-magnetic><span data-i18n="samples.open">${t("samples.open")}</span><i class="arr">→</i></a>
       </article>`).join("");
     $("#sampleGrid", root).innerHTML = cards(SAMPLES, 6);
+    // Gerçek kayıtlar: temiz referans yok, yalnızca gürültülü dinlenir ve stüdyoya gönderilir
+    const realCards = (list, start) => list.map((s, i) => `
+      <article class="card scard" data-reveal style="--i:${i + start}" data-id="${s.id}" data-real>
+        <div class="scard-head"><span class="snr low" data-i18n="samples.realTag">${t("samples.realTag")}</span><span class="mono dim" data-i18n="samples.src.real">${t("samples.src.real")}</span></div>
+        <h3 data-real-label="${s.key}">${realLabel(s)}</h3>
+        <div class="swave"><canvas></canvas><span class="sprog"></span></div>
+        <div class="sbtns">
+          <button type="button" class="sbtn" data-kind="noisy"><svg viewBox="0 0 12 12"><path d="M2 1v10l9-5z"/></svg><span data-i18n="samples.noisy">${t("samples.noisy")}</span></button>
+          <button type="button" class="sbtn clean" data-kind="enhanced"><svg viewBox="0 0 12 12"><path d="M2 1v10l9-5z"/></svg><span data-i18n="samples.enhanced">${t("samples.enhanced")}</span></button>
+        </div>
+        <a href="#/studio" class="btn btn-ghost" data-open data-magnetic><span data-i18n="samples.open">${t("samples.open")}</span><i class="arr">→</i></a>
+      </article>`).join("");
 
     const loadWaves = (scope) => $$(".scard", scope).forEach(async (card) => {
       try {
-        const [n, c] = await Promise.all(["noisy", "clean"].map(async (k) =>
+        const kinds = card.hasAttribute("data-real") ? ["noisy"] : ["noisy", "clean"];
+        const [n, c] = await Promise.all(kinds.map(async (k) =>
           DSP.decodeToMono16k(await (await fetch(sampleUrl(card.dataset.id, k))).arrayBuffer())));
         cache[card.dataset.id] = { noisy: n, clean: c, norm: DSP.peaks(n, 300).max };
         paint(card);
+        if (card.hasAttribute("data-real") && REAL_ENH[card.dataset.id]) enhancedUrl(card).catch(() => {}); // daha önce temizlendiyse çiz
       } catch { /* file:// altında fetch çalışmaz; dalga formu boş kalır */ }
     });
 
@@ -837,12 +886,19 @@
       loadWaves($("#trGrid", root));
     });
 
+    realReady.then(() => {
+      if (!REAL || !root.isConnected) return;
+      $("#realSection", root).hidden = false;
+      $("#realGrid", root).innerHTML = realCards(REAL, 2);
+      loadWaves($("#realGrid", root));
+    });
+
     const paint = (card) => {
       const d = cache[card.dataset.id]; if (!d) return;
-      drawWave($("canvas", card), [
+      drawWave($("canvas", card), d.clean ? [
         { samples: d.noisy, color: cssVar("--line-2"), alpha: 1, norm: d.norm },
         { samples: d.clean, color: cssVar("--accent-2"), alpha: 0.9, norm: d.norm },
-      ]);
+      ] : [{ samples: d.noisy, color: cssVar("--ink-2"), alpha: 0.85, norm: d.norm }]);
     };
     loadWaves($("#sampleGrid", root));
 
@@ -859,7 +915,33 @@
     };
     audio.addEventListener("ended", stopActive);
 
-    grid.addEventListener("click", (e) => {
+    // Gerçek kayıtların temiz hali yok: "Temizlenmiş" modelin çıktısını çalar. Çıktı sunucudan bir kez alınır,
+    // sayfalar arası saklanır (REAL_ENH) ve fare karta gelince arka planda hazırlanmaya başlar.
+    const enhancedUrl = (card) => {
+      const id = card.dataset.id;
+      if (!REAL_ENH[id]) {
+        if (app.server.state !== "online") return Promise.reject(new Error("offline"));
+        const model = app.server.models.find((m) => m.local)?.id || app.server.models[0]?.id || "e3_depth5";
+        REAL_ENH[id] = (async () => {
+          const noisy = await (await fetch(sampleUrl(id, "noisy"))).arrayBuffer();
+          const res = await fetch(`/api/enhance?${new URLSearchParams({ model })}`, { method: "POST", body: noisy, headers: { "Content-Type": "audio/wav" } });
+          if (!res.ok) throw new Error(res.status);
+          const blob = await res.blob();
+          return { url: URL.createObjectURL(blob), samples: await DSP.decodeToMono16k(await blob.arrayBuffer()) };
+        })();
+        REAL_ENH[id].catch(() => delete REAL_ENH[id]); // başarısızsa bir dahaki tıklamada yeniden dene
+      }
+      return REAL_ENH[id].then((r) => {
+        if (cache[id] && !cache[id].clean && card.isConnected) { cache[id].clean = r.samples; paint(card); }
+        return r.url;
+      });
+    };
+    grid.addEventListener("pointerenter", (e) => {
+      const card = e.target.closest?.(".scard[data-real]");
+      if (card && app.server.state === "online") enhancedUrl(card).catch(() => {});
+    }, true);
+
+    grid.addEventListener("click", async (e) => {
       const card = e.target.closest(".scard"); if (!card) return;
       if (e.target.closest("[data-open]")) { app.studio.pendingSample = card.dataset.id; return; }
       const b = e.target.closest(".sbtn");
@@ -869,12 +951,19 @@
         audio.currentTime = ((e.clientX - r.left) / r.width) * audio.duration;
         return;
       }
-      if (!b) return;
+      if (!b || b.classList.contains("busy")) return;
       const kind = b.dataset.kind;
       if (active?.card === card && active.kind === kind) { stopActive(); return; }
+      let src;
+      if (kind === "enhanced") {
+        b.classList.add("busy");
+        try { src = await enhancedUrl(card); }
+        catch (err) { toast(err.message === "offline" ? t("samples.needServer") : t("toast.server"), "err"); return; }
+        finally { b.classList.remove("busy"); }
+      } else src = sampleUrl(card.dataset.id, kind);
       const keep = active?.card === card ? audio.currentTime : 0;
       stopActive();
-      audio.src = sampleUrl(card.dataset.id, kind);
+      audio.src = src;
       audio.currentTime = keep;
       audio.play().catch(() => {});
       active = { card, kind };
@@ -884,7 +973,10 @@
     const onResize = () => $$(".scard", grid).forEach(paint);
     addEventListener("resize", onResize);
     app.onTheme = () => requestAnimationFrame(onResize);
-    app.onLang = renderTrials;
+    app.onLang = () => {
+      renderTrials();
+      $$("[data-real-label]", root).forEach((h) => { const s = REAL?.find((x) => x.key === h.dataset.realLabel); if (s) h.innerHTML = realLabel(s); });
+    };
     app.cleanups.push(() => { stopActive(); cancelAnimationFrame(raf); removeEventListener("resize", onResize); audio.src = ""; });
   }
 
@@ -1028,8 +1120,14 @@
 
   // ------------------------------------------------------------------ başlat
   applyI18n(document);
-  updateStatusPill();
   app.ready = intro();
+  // Site turu (tour.js) için dar bir köprü: çeviri, tercih deposu ve sayfanın yerleşip yerleşmediği
+  window.SesTemiz = {
+    t, lang, store, reduced,
+    ready: app.ready,
+    route: () => app.mounted,
+    settled: () => view.classList.contains("in") && !html.dataset.vt,
+  };
   navigate(true);
   checkServer();
   setInterval(() => { if (app.server.state !== "online") checkServer(); }, 8000);
